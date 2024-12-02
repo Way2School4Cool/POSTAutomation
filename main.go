@@ -163,15 +163,20 @@ func main() {
 
 		// Move processed file to completed folder
 		completedDir := filepath.Join(filepath.Dir(cfg.FolderPath), "completed")
-		if err := os.MkdirAll(completedDir, 0755); err != nil {
-			log.Printf("Failed to create completed directory for file %s: %v", file.Name(), err)
+		// Preserve the relative path structure
+		relPath, err := filepath.Rel(cfg.FolderPath, filePath)
+		if err != nil {
+			log.Printf("Failed to get relative path for file %s: %v", filePath, err)
 			continue
 		}
-
-		oldPath := filepath.Join(cfg.FolderPath, file.Name())
-		newPath := filepath.Join(completedDir, file.Name())
-		if err := os.Rename(oldPath, newPath); err != nil {
-			log.Printf("Failed to move file %s to completed directory: %v", file.Name(), err)
+		newPath := filepath.Join(completedDir, relPath)
+		// Create the nested directory structure
+		if err := os.MkdirAll(filepath.Dir(newPath), 0755); err != nil {
+			log.Printf("Failed to create completed directory structure for file %s: %v", filePath, err)
+			continue
+		}
+		if err := os.Rename(filePath, newPath); err != nil {
+			log.Printf("Failed to move file %s to completed directory: %v", filePath, err)
 			continue
 		}
 
