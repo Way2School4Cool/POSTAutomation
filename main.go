@@ -162,7 +162,7 @@ func main() {
 		}
 
 		// Move processed file to completed folder
-		completedDir := filepath.Join(cfg.FolderPath, "completed")
+		completedDir := filepath.Join(filepath.Dir(cfg.FolderPath), "completed")
 		if err := os.MkdirAll(completedDir, 0755); err != nil {
 			log.Printf("Failed to create completed directory for file %s: %v", file.Name(), err)
 			continue
