@@ -146,11 +146,24 @@ func main() {
 		writer := csv.NewWriter(csvFile)
 		defer writer.Flush()
 
-		if err := writer.Write([]string{requestData.ContractID, responseData.AddContractSyncResposnse.AddContractSyncResponse.TransactionID}); err != nil {
+		if err := writer.Write([]string{file.Name(), responseData.AddContractSyncResposnse.AddContractSyncResponse.TransactionID}); err != nil {
 			log.Printf("Failed to write to CSV for file %s: %v", file.Name(), err)
 			continue
 		}
 
-		log.Printf("Processed file %s and saved response to CSV", file.Name())
+		// Move processed file to completed folder
+		completedDir := filepath.Join(filepath.Dir(file.Name()), "completed")
+		if err := os.MkdirAll(completedDir, 0755); err != nil {
+			log.Printf("Failed to create completed directory for file %s: %v", file.Name(), err)
+			continue
+		}
+
+		newPath := filepath.Join(completedDir, filepath.Base(file.Name()))
+		if err := os.Rename(file.Name(), newPath); err != nil {
+			log.Printf("Failed to move file %s to completed directory: %v", file.Name(), err)
+			continue
+		}
+
+		log.Printf("Processed file %s, saved response to CSV, and moved to completed folder", file.Name())
 	}
 }
