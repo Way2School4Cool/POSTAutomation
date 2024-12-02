@@ -1,0 +1,7 @@
+{
+    "folderPath": "./xmls",
+    "apiEndpoint": "https://your-api-endpoint.com",
+    "responsesFile": "./responses.csv",
+    "pfxPath": "./cert.pfx",
+    "pfxPassword": "your-pfx-password"
+} 
