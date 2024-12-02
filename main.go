@@ -2,28 +2,46 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/csv"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
-	//openssl pkcs12 -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -export -macalg sha1
+	//openssl pkcs12 -export -inkey mykey.pem -in mycert.pem -out output.p12 -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -export -macalg sha1
 
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
+	"github.com/aws/aws-sdk-go/aws"
 	"golang.org/x/crypto/pkcs12"
 )
 
 type Config struct {
-	FolderPath    string `json:"folderPath"`
-	APIEndpoint   string `json:"apiEndpoint"`
-	ResponsesFile string `json:"responsesFile"`
-	PfxPath       string `json:"pfxPath"`
-	PfxPassword   string `json:"pfxPassword"`
+	FolderPath      string `json:"folderPath"`
+	APIEndpoint     string `json:"apiEndpoint"`
+	ResponsesFile   string `json:"responsesFile"`
+	PfxPath         string `json:"pfxPath"`
+	PfxPassword     string `json:"pfxPassword"`
+	AWSRegion       string `json:"awsRegion"`
+	LogGroupName    string `json:"logGroupName"`
+	AWSAccessKey    string `json:"awsAccessKey"`
+	AWSSecretKey    string `json:"awsSecretKey"`
+	AWSSessionToken string `json:"awsSessionToken"`
+}
+
+type PendingTransaction struct {
+	FileName      string
+	TransactionID string
 }
 
 func loadConfig() Config {
@@ -38,6 +56,72 @@ func loadConfig() Config {
 	}
 
 	return config
+}
+
+func queryAWSData(ctx context.Context, cfg Config, transactionID string) (string, error) {
+	// Load AWS configuration with credentials
+	awsCfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(cfg.AWSRegion),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			cfg.AWSAccessKey,
+			cfg.AWSSecretKey,
+			cfg.AWSSessionToken,
+		)),
+	)
+	if err != nil {
+		return "", fmt.Errorf("unable to load AWS SDK config: %v", err)
+	}
+
+	// Create CloudWatch Logs client
+	cwl := cloudwatchlogs.NewFromConfig(awsCfg)
+
+	// Add timeout logic
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("timeout waiting for contract ID")
+		case <-time.After(20 * time.Second):
+			// Create the query input
+			queryString := fmt.Sprintf(`
+				fields ObjJson.addContractAsyncResponse.transactionID, 
+				fields ObjJson.addContractAsyncResponse.results.contact.contractID 
+				| parse @message /.*ObjJson.addContractAsyncResponse.results.contact.contractID=(?<ContractID[\w-]+)/ 
+				| filter ObjJson.addContractAsyncResponse.transactionID in ['%s'] 
+				and not isempty(ObjJson.addContractAsyncResponse.results.contact.contractID) 
+				| sort @timestamp desc`,
+				transactionID)
+
+			startQuery, err := cwl.StartQuery(ctx, &cloudwatchlogs.StartQueryInput{
+				LogGroupName: aws.String(cfg.LogGroupName),
+				StartTime:    aws.Int64(time.Now().Add(-1 * time.Hour).Unix()), // Search last hour
+				EndTime:      aws.Int64(time.Now().Unix()),
+				QueryString:  aws.String(queryString),
+			})
+			if err != nil {
+				return "", fmt.Errorf("failed to start CloudWatch query: %v", err)
+			}
+
+			// Poll for results
+			results, err := cwl.GetQueryResults(ctx, &cloudwatchlogs.GetQueryResultsInput{
+				QueryId: startQuery.QueryId,
+			})
+			if err != nil {
+				return "", fmt.Errorf("failed to get query results: %v", err)
+			}
+
+			// If we find a ContractID, return it
+			if results.Status == types.QueryStatusComplete && len(results.Results) > 0 {
+				for _, field := range results.Results[0] {
+					if *field.Field == "ContractID" {
+						return *field.Value, nil
+					}
+				}
+			}
+		}
+	}
 }
 
 func main() {
@@ -85,6 +169,10 @@ func main() {
 		log.Fatalf("Failed to walk through folder: %v", err)
 	}
 
+	// Create slice to store pending transactions
+	var pendingTransactions []PendingTransaction
+
+	// First pass: Process all files and collect transaction IDs
 	for _, file := range files {
 		// Skip if it's not an XML file
 		if filepath.Ext(file.Name()) != ".xml" {
@@ -145,10 +233,30 @@ func main() {
 			continue
 		}
 
+		// After getting response, store transaction info instead of querying AWS
+		pendingTransactions = append(pendingTransactions, PendingTransaction{
+			FileName:      file.Name(),
+			TransactionID: responseData.AddContractSyncResposnse.AddContractSyncResponse.TransactionID,
+		})
+
+		log.Printf("Processed file %s, stored transaction ID: %s", file.Name(),
+			responseData.AddContractSyncResposnse.AddContractSyncResponse.TransactionID)
+	}
+
+	// Second pass: Query AWS for all pending transactions
+	log.Printf("Starting AWS queries for %d transactions", len(pendingTransactions))
+	for _, transaction := range pendingTransactions {
+		contractID, err := queryAWSData(context.Background(), cfg, transaction.TransactionID)
+		if err != nil {
+			log.Printf("Failed to query AWS for transactionID %s: %v",
+				transaction.TransactionID, err)
+			continue
+		}
+
 		// Append to CSV file
 		csvFile, err := os.OpenFile(cfg.ResponsesFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			log.Printf("Failed to open CSV file for file %s: %v", file.Name(), err)
+			log.Printf("Failed to open CSV file for file %s: %v", transaction.FileName, err)
 			continue
 		}
 		defer csvFile.Close()
@@ -156,30 +264,16 @@ func main() {
 		writer := csv.NewWriter(csvFile)
 		defer writer.Flush()
 
-		if err := writer.Write([]string{file.Name(), responseData.AddContractSyncResposnse.AddContractSyncResponse.TransactionID}); err != nil {
-			log.Printf("Failed to write to CSV for file %s: %v", file.Name(), err)
+		// Write file name, transaction ID, and contract ID to CSV
+		if err := writer.Write([]string{
+			transaction.FileName,
+			transaction.TransactionID,
+			contractID,
+		}); err != nil {
+			log.Printf("Failed to write to CSV for file %s: %v", transaction.FileName, err)
 			continue
 		}
 
-		// Move processed file to completed folder
-		completedDir := filepath.Join(filepath.Dir(cfg.FolderPath), "completed")
-		// Preserve the relative path structure
-		relPath, err := filepath.Rel(cfg.FolderPath, filePath)
-		if err != nil {
-			log.Printf("Failed to get relative path for file %s: %v", filePath, err)
-			continue
-		}
-		newPath := filepath.Join(completedDir, relPath)
-		// Create the nested directory structure
-		if err := os.MkdirAll(filepath.Dir(newPath), 0755); err != nil {
-			log.Printf("Failed to create completed directory structure for file %s: %v", filePath, err)
-			continue
-		}
-		if err := os.Rename(filePath, newPath); err != nil {
-			log.Printf("Failed to move file %s to completed directory: %v", filePath, err)
-			continue
-		}
-
-		log.Printf("Processed file %s, saved response to CSV, and moved to completed folder", file.Name())
+		log.Printf("Processed file %s and saved response to CSV with ContractID: %s", transaction.FileName, contractID)
 	}
 }

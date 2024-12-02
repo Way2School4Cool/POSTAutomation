@@ -3,5 +3,10 @@
     "apiEndpoint": "https://your-api-endpoint.com",
     "responsesFile": "./responses.csv",
     "pfxPath": "./cert.pfx",
-    "pfxPassword": "your-pfx-password"
+    "pfxPassword": "your-pfx-password",
+    "awsRegion": "us-east-1",
+    "logGroupName": "/aws/your-log-group-name",
+    "awsAccessKey": "your-access-key",
+    "awsSecretKey": "your-secret-key",
+    "awsSessionToken": "your-session-token"
 } 
