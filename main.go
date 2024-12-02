@@ -85,13 +85,7 @@ func queryAWSData(ctx context.Context, cfg Config, transactionID string) (string
 			return "", fmt.Errorf("timeout waiting for contract ID")
 		case <-time.After(20 * time.Second):
 			// Create the query input
-			queryString := fmt.Sprintf(`
-				fields ObjJson.addContractAsyncResponse.transactionID, 
-				fields ObjJson.addContractAsyncResponse.results.contact.contractID 
-				| parse @message /.*ObjJson.addContractAsyncResponse.results.contact.contractID=(?<ContractID[\w-]+)/ 
-				| filter ObjJson.addContractAsyncResponse.transactionID in ['%s'] 
-				and not isempty(ObjJson.addContractAsyncResponse.results.contact.contractID) 
-				| sort @timestamp desc`,
+			queryString := fmt.Sprintf(`fields ObjJson.addContractAsyncResponse.transactionId, ObjJson.addContractAsyncResponse.results.contract.contractID | parse @message /.*ObjJson.addContractAsyncResponse.results.contract.contractID=(?<ContractID>[\w-]+)/ | filter ObjJson.addContractAsyncResponse.transactionId in ['%s'] and not isempty(ObjJson.addContractAsyncResponse.results.contract.contractID ) | sort @timestamp desc | limit 20`,
 				transactionID)
 
 			startQuery, err := cwl.StartQuery(ctx, &cloudwatchlogs.StartQueryInput{
@@ -110,6 +104,10 @@ func queryAWSData(ctx context.Context, cfg Config, transactionID string) (string
 			})
 			if err != nil {
 				return "", fmt.Errorf("failed to get query results: %v", err)
+			}
+
+			for results.Status == types.QueryStatusRunning {
+				time.After(5 * time.Second)
 			}
 
 			// If we find a ContractID, return it
