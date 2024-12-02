@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/csv"
 	"encoding/json"
@@ -8,10 +9,8 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 
 	//openssl pkcs12 -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -export -macalg sha1
 
@@ -91,17 +90,18 @@ func main() {
 			continue
 		}
 
-		// Modified POST request using custom client
-		formData := url.Values{}
-		formData.Set("xml", string(xmlData)) // Add XML as form data
+		// Debug: Print the XML content we're about to send
+		log.Printf("Sending XML content for %s:\n%s", file.Name(), string(xmlData))
 
-		req, err := http.NewRequest("POST", cfg.APIEndpoint, strings.NewReader(formData.Encode()))
+		// Modified POST request using custom client
+		req, err := http.NewRequest("POST", cfg.APIEndpoint, bytes.NewReader(xmlData))
 		if err != nil {
 			log.Printf("Failed to create request for file %s: %v", file.Name(), err)
 			continue
 		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded") // Changed content type
+		req.Header.Set("Content-Type", "text/plain")
 
+		// Debug: Print the full response details
 		resp, err := client.Do(req)
 		if err != nil {
 			log.Printf("Failed to send POST request for file %s: %v", file.Name(), err)
@@ -115,6 +115,11 @@ func main() {
 			log.Printf("Failed to read response for file %s: %v", file.Name(), err)
 			continue
 		}
+
+		// Debug: Print response details
+		log.Printf("Response Status: %s", resp.Status)
+		log.Printf("Response Headers: %v", resp.Header)
+		log.Printf("Response Body: %s", string(responseBody))
 
 		// Extract contractID from XML request
 		var requestData struct {
