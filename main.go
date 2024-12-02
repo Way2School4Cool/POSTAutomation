@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/tls"
 	"encoding/csv"
 	"encoding/json"
@@ -9,8 +8,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	//openssl pkcs12 -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -export -macalg sha1
 
@@ -91,12 +92,15 @@ func main() {
 		}
 
 		// Modified POST request using custom client
-		req, err := http.NewRequest("POST", cfg.APIEndpoint, bytes.NewBuffer(xmlData))
+		formData := url.Values{}
+		formData.Set("xml", string(xmlData)) // Add XML as form data
+
+		req, err := http.NewRequest("POST", cfg.APIEndpoint, strings.NewReader(formData.Encode()))
 		if err != nil {
 			log.Printf("Failed to create request for file %s: %v", file.Name(), err)
 			continue
 		}
-		req.Header.Set("Content-Type", "application/xml")
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded") // Changed content type
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -123,13 +127,13 @@ func main() {
 
 		// Extract transactionID from XML response
 		var responseData struct {
-			XMLName                  xml.Name `xml:"AddContractAsyncResponseBatchXML"`
-			AddContractAsyncResponse struct {
-				AddContractAsyncResponse struct {
+			XMLName                  xml.Name `xml:"AddContractSyncResponseBatchXML"`
+			AddContractSyncResposnse struct {
+				AddContractSyncResponse struct {
 					TransactionID  string `xml:"transactionID"`
 					ResponseStatus string `xml:"responseStatus"`
-				} `xml:"AddContractAsyncResponse"`
-			} `xml:"addContractAsyncResponse"`
+				} `xml:"AddContractSyncResponse"`
+			} `xml:"addContractSyncResponse"`
 		}
 		if err := xml.Unmarshal(responseBody, &responseData); err != nil {
 			log.Printf("Failed to parse transactionID from response %s: %v", file.Name(), err)
@@ -147,7 +151,7 @@ func main() {
 		writer := csv.NewWriter(csvFile)
 		defer writer.Flush()
 
-		if err := writer.Write([]string{requestData.ContractID, responseData.AddContractAsyncResponse.AddContractAsyncResponse.TransactionID}); err != nil {
+		if err := writer.Write([]string{requestData.ContractID, responseData.AddContractSyncResposnse.AddContractSyncResponse.TransactionID}); err != nil {
 			log.Printf("Failed to write to CSV for file %s: %v", file.Name(), err)
 			continue
 		}
