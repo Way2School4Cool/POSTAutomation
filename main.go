@@ -90,18 +90,14 @@ func main() {
 			continue
 		}
 
-		// Debug: Print the XML content we're about to send
-		log.Printf("Sending XML content for %s:\n%s", file.Name(), string(xmlData))
-
 		// Modified POST request using custom client
 		req, err := http.NewRequest("POST", cfg.APIEndpoint, bytes.NewReader(xmlData))
 		if err != nil {
 			log.Printf("Failed to create request for file %s: %v", file.Name(), err)
 			continue
 		}
-		req.Header.Set("Content-Type", "text/plain")
+		req.Header.Set("Content-Type", "text/xml")
 
-		// Debug: Print the full response details
 		resp, err := client.Do(req)
 		if err != nil {
 			log.Printf("Failed to send POST request for file %s: %v", file.Name(), err)
@@ -109,17 +105,11 @@ func main() {
 		}
 		defer resp.Body.Close()
 
-		// Read and log the response
 		responseBody, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("Failed to read response for file %s: %v", file.Name(), err)
 			continue
 		}
-
-		// Debug: Print response details
-		log.Printf("Response Status: %s", resp.Status)
-		log.Printf("Response Headers: %v", resp.Header)
-		log.Printf("Response Body: %s", string(responseBody))
 
 		// Extract contractID from XML request
 		var requestData struct {
