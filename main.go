@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -69,10 +70,19 @@ func main() {
 		},
 	}
 
-	// Open the folder
-	files, err := os.ReadDir(cfg.FolderPath)
+	// Walk through the folder recursively
+	var files []os.DirEntry
+	err = filepath.WalkDir(cfg.FolderPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			files = append(files, d)
+		}
+		return nil
+	})
 	if err != nil {
-		log.Fatalf("Failed to read folder: %v", err)
+		log.Fatalf("Failed to walk through folder: %v", err)
 	}
 
 	for _, file := range files {
@@ -152,14 +162,15 @@ func main() {
 		}
 
 		// Move processed file to completed folder
-		completedDir := filepath.Join(filepath.Dir(file.Name()), "completed")
+		completedDir := filepath.Join(cfg.FolderPath, "completed")
 		if err := os.MkdirAll(completedDir, 0755); err != nil {
 			log.Printf("Failed to create completed directory for file %s: %v", file.Name(), err)
 			continue
 		}
 
-		newPath := filepath.Join(completedDir, filepath.Base(file.Name()))
-		if err := os.Rename(file.Name(), newPath); err != nil {
+		oldPath := filepath.Join(cfg.FolderPath, file.Name())
+		newPath := filepath.Join(completedDir, file.Name())
+		if err := os.Rename(oldPath, newPath); err != nil {
 			log.Printf("Failed to move file %s to completed directory: %v", file.Name(), err)
 			continue
 		}
