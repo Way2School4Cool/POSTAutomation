@@ -107,13 +107,19 @@ func queryAWSData(ctx context.Context, cfg Config, transactionID string) (string
 			}
 
 			for results.Status == types.QueryStatusRunning {
-				time.After(5 * time.Second)
+				time.Sleep(5 * time.Second)
+				results, err = cwl.GetQueryResults(ctx, &cloudwatchlogs.GetQueryResultsInput{
+					QueryId: startQuery.QueryId,
+				})
+				if err != nil {
+					return "", fmt.Errorf("failed to get query results: %v", err)
+				}
 			}
 
 			// If we find a ContractID, return it
 			if results.Status == types.QueryStatusComplete && len(results.Results) > 0 {
 				for _, field := range results.Results[0] {
-					if *field.Field == "ContractID" {
+					if *field.Field == "ObjJson.addContractAsyncResponse.results.contract.contractID" {
 						return *field.Value, nil
 					}
 				}
