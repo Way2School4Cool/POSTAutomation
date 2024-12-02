@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 
+	//openssl pkcs12 -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -export -macalg sha1
+
 	"golang.org/x/crypto/pkcs12"
 )
 
@@ -55,6 +57,7 @@ func main() {
 	tlsCert := tls.Certificate{
 		Certificate: [][]byte{cert.Raw},
 		PrivateKey:  priv,
+		Leaf:        cert,
 	}
 
 	// Create custom HTTP client with certificate
@@ -118,6 +121,21 @@ func main() {
 			continue
 		}
 
+		// Extract transactionID from XML response
+		var responseData struct {
+			XMLName                  xml.Name `xml:"AddContractAsyncResponseBatchXML"`
+			AddContractAsyncResponse struct {
+				AddContractAsyncResponse struct {
+					TransactionID  string `xml:"transactionID"`
+					ResponseStatus string `xml:"responseStatus"`
+				} `xml:"AddContractAsyncResponse"`
+			} `xml:"addContractAsyncResponse"`
+		}
+		if err := xml.Unmarshal(responseBody, &responseData); err != nil {
+			log.Printf("Failed to parse transactionID from response %s: %v", file.Name(), err)
+			continue
+		}
+
 		// Append to CSV file
 		csvFile, err := os.OpenFile(cfg.ResponsesFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
@@ -129,7 +147,7 @@ func main() {
 		writer := csv.NewWriter(csvFile)
 		defer writer.Flush()
 
-		if err := writer.Write([]string{requestData.ContractID, string(responseBody)}); err != nil {
+		if err := writer.Write([]string{requestData.ContractID, responseData.AddContractAsyncResponse.AddContractAsyncResponse.TransactionID}); err != nil {
 			log.Printf("Failed to write to CSV for file %s: %v", file.Name(), err)
 			continue
 		}
