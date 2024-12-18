@@ -26,6 +26,9 @@ import (
 	"golang.org/x/crypto/pkcs12"
 )
 
+var cfg Config
+var pendingTransactions []PendingTransaction
+
 type Config struct {
 	FolderPath      string `json:"folderPath"`
 	APIEndpoint     string `json:"apiEndpoint"`
@@ -58,80 +61,28 @@ func loadConfig() Config {
 	return config
 }
 
-func queryAWSData(ctx context.Context, cfg Config, transactionID string) (string, error) {
-	// Load AWS configuration with credentials
-	awsCfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(cfg.AWSRegion),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			cfg.AWSAccessKey,
-			cfg.AWSSecretKey,
-			cfg.AWSSessionToken,
-		)),
-	)
-	if err != nil {
-		return "", fmt.Errorf("unable to load AWS SDK config: %v", err)
-	}
+func main() {
+	// Load configuration
+	cfg = loadConfig()
 
-	// Create CloudWatch Logs client
-	cwl := cloudwatchlogs.NewFromConfig(awsCfg)
-
-	// Add timeout logic
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return "", fmt.Errorf("timeout waiting for contract ID")
-		case <-time.After(20 * time.Second):
-			// Create the query input
-			queryString := fmt.Sprintf(`fields ObjJson.addContractAsyncResponse.transactionId, ObjJson.addContractAsyncResponse.results.contract.contractID | parse @message /.*ObjJson.addContractAsyncResponse.results.contract.contractID=(?<ContractID>[\w-]+)/ | filter ObjJson.addContractAsyncResponse.transactionId in ['%s'] and not isempty(ObjJson.addContractAsyncResponse.results.contract.contractID ) | sort @timestamp desc | limit 20`,
-				transactionID)
-
-			startQuery, err := cwl.StartQuery(ctx, &cloudwatchlogs.StartQueryInput{
-				LogGroupName: aws.String(cfg.LogGroupName),
-				StartTime:    aws.Int64(time.Now().Add(-1 * time.Hour).Unix()), // Search last hour
-				EndTime:      aws.Int64(time.Now().Unix()),
-				QueryString:  aws.String(queryString),
-			})
-			if err != nil {
-				return "", fmt.Errorf("failed to start CloudWatch query: %v", err)
-			}
-
-			// Poll for results
-			results, err := cwl.GetQueryResults(ctx, &cloudwatchlogs.GetQueryResultsInput{
-				QueryId: startQuery.QueryId,
-			})
-			if err != nil {
-				return "", fmt.Errorf("failed to get query results: %v", err)
-			}
-
-			for results.Status == types.QueryStatusRunning {
-				time.Sleep(5 * time.Second)
-				results, err = cwl.GetQueryResults(ctx, &cloudwatchlogs.GetQueryResultsInput{
-					QueryId: startQuery.QueryId,
-				})
-				if err != nil {
-					return "", fmt.Errorf("failed to get query results: %v", err)
-				}
-			}
-
-			// If we find a ContractID, return it
-			if results.Status == types.QueryStatusComplete && len(results.Results) > 0 {
-				for _, field := range results.Results[0] {
-					if *field.Field == "ObjJson.addContractAsyncResponse.results.contract.contractID" {
-						return *field.Value, nil
-					}
-				}
-			}
+	apiRequestHandler()
+	// Second pass: Query AWS for all pending transactions
+	log.Printf("Starting AWS queries for %d transactions", len(pendingTransactions))
+	for _, transaction := range pendingTransactions {
+		contractID, err := queryAWSData(context.Background(), cfg, transaction.TransactionID)
+		if err != nil {
+			log.Printf("Failed to query AWS for transactionID %s: %v",
+				transaction.TransactionID, err)
+			continue
 		}
+
+		CsvWriter(transaction, contractID)
+
+		log.Printf("Processed file %s and saved response to CSV with ContractID: %s", transaction.FileName, contractID)
 	}
 }
 
-func main() {
-	// Load configuration
-	cfg := loadConfig()
-
+func apiRequestHandler() {
 	// Load PFX certificate
 	pfxData, err := os.ReadFile(cfg.PfxPath)
 	if err != nil {
@@ -172,9 +123,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to walk through folder: %v", err)
 	}
-
-	// Create slice to store pending transactions
-	var pendingTransactions []PendingTransaction
 
 	// First pass: Process all files and collect transaction IDs
 	for _, file := range files {
@@ -246,38 +194,97 @@ func main() {
 		log.Printf("Processed file %s, stored transaction ID: %s", file.Name(),
 			responseData.AddContractSyncResposnse.AddContractSyncResponse.TransactionID)
 	}
+}
 
-	// Second pass: Query AWS for all pending transactions
-	log.Printf("Starting AWS queries for %d transactions", len(pendingTransactions))
-	for _, transaction := range pendingTransactions {
-		contractID, err := queryAWSData(context.Background(), cfg, transaction.TransactionID)
-		if err != nil {
-			log.Printf("Failed to query AWS for transactionID %s: %v",
-				transaction.TransactionID, err)
-			continue
+func CsvWriter(transaction PendingTransaction, contractID string) {
+	// Append to CSV file
+	csvFile, err := os.OpenFile(cfg.ResponsesFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("Failed to open CSV file for file %s: %v", transaction.FileName, err)
+		return
+	}
+	defer csvFile.Close()
+
+	writer := csv.NewWriter(csvFile)
+	defer writer.Flush()
+
+	// Write file name, transaction ID, and contract ID to CSV
+	if err := writer.Write([]string{
+		transaction.FileName,
+		transaction.TransactionID,
+		contractID,
+	}); err != nil {
+		log.Printf("Failed to write to CSV for file %s: %v", transaction.FileName, err)
+		return
+	}
+}
+
+func queryAWSData(ctx context.Context, cfg Config, transactionID string) (string, error) {
+	// Load AWS configuration with credentials
+	awsCfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(cfg.AWSRegion),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			cfg.AWSAccessKey,
+			cfg.AWSSecretKey,
+			cfg.AWSSessionToken,
+		)),
+	)
+	if err != nil {
+		return "", fmt.Errorf("unable to load AWS SDK config: %v", err)
+	}
+
+	// Create CloudWatch Logs client
+	cwl := cloudwatchlogs.NewFromConfig(awsCfg)
+
+	// Add timeout logic
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("timeout waiting for contract ID")
+		case <-time.After(20 * time.Second):
+			// Create the query input
+			queryString := fmt.Sprintf(`fields ObjJson.addContractAsyncResponse.transactionId, ObjJson.addContractAsyncResponse.results.contract.contractID | parse @message /.*ObjJson.addContractAsyncResponse.results.contract.contractID=(?<ContractID>[\w-]+)/ | filter ObjJson.addContractAsyncResponse.transactionId in ['%s'] and not isempty(ObjJson.addContractAsyncResponse.results.contract.contractID ) | sort @timestamp desc | limit 20`,
+				transactionID)
+
+			startQuery, err := cwl.StartQuery(ctx, &cloudwatchlogs.StartQueryInput{
+				LogGroupName: aws.String(cfg.LogGroupName),
+				StartTime:    aws.Int64(time.Now().Add(-1 * time.Hour).Unix()), // Search last hour
+				EndTime:      aws.Int64(time.Now().Unix()),
+				QueryString:  aws.String(queryString),
+			})
+			if err != nil {
+				return "", fmt.Errorf("failed to start CloudWatch query: %v", err)
+			}
+
+			// Poll for results
+			results, err := cwl.GetQueryResults(ctx, &cloudwatchlogs.GetQueryResultsInput{
+				QueryId: startQuery.QueryId,
+			})
+			if err != nil {
+				return "", fmt.Errorf("failed to get query results: %v", err)
+			}
+
+			for results.Status == types.QueryStatusRunning {
+				time.Sleep(5 * time.Second)
+				results, err = cwl.GetQueryResults(ctx, &cloudwatchlogs.GetQueryResultsInput{
+					QueryId: startQuery.QueryId,
+				})
+				if err != nil {
+					return "", fmt.Errorf("failed to get query results: %v", err)
+				}
+			}
+
+			// If we find a ContractID, return it
+			if results.Status == types.QueryStatusComplete && len(results.Results) > 0 {
+				for _, field := range results.Results[0] {
+					if *field.Field == "ObjJson.addContractAsyncResponse.results.contract.contractID" {
+						return *field.Value, nil
+					}
+				}
+			}
 		}
-
-		// Append to CSV file
-		csvFile, err := os.OpenFile(cfg.ResponsesFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			log.Printf("Failed to open CSV file for file %s: %v", transaction.FileName, err)
-			continue
-		}
-		defer csvFile.Close()
-
-		writer := csv.NewWriter(csvFile)
-		defer writer.Flush()
-
-		// Write file name, transaction ID, and contract ID to CSV
-		if err := writer.Write([]string{
-			transaction.FileName,
-			transaction.TransactionID,
-			contractID,
-		}); err != nil {
-			log.Printf("Failed to write to CSV for file %s: %v", transaction.FileName, err)
-			continue
-		}
-
-		log.Printf("Processed file %s and saved response to CSV with ContractID: %s", transaction.FileName, contractID)
 	}
 }
