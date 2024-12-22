@@ -9,7 +9,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -45,6 +44,8 @@ type Config struct {
 type PendingTransaction struct {
 	FileName      string
 	TransactionID string
+	IsFollowup    bool
+	ContractID    string
 }
 
 func loadConfig() Config {
@@ -62,37 +63,121 @@ func loadConfig() Config {
 }
 
 func main() {
-	// Load configuration
 	cfg = loadConfig()
 
-	apiRequestHandler()
-	// Second pass: Query AWS for all pending transactions
-	log.Printf("Starting AWS queries for %d transactions", len(pendingTransactions))
-	for _, transaction := range pendingTransactions {
-		contractID, err := queryAWSData(context.Background(), cfg, transaction.TransactionID)
-		if err != nil {
-			log.Printf("Failed to query AWS for transactionID %s: %v",
-				transaction.TransactionID, err)
-			continue
-		}
+	// Process CSV file to get batch groups
+	batchGroups := loadBatchGroups(cfg.ResponsesFile)
 
-		CsvWriter(transaction, contractID)
-
-		log.Printf("Processed file %s and saved response to CSV with ContractID: %s", transaction.FileName, contractID)
+	for _, batch := range batchGroups {
+		processBatch(batch)
 	}
 }
 
-func apiRequestHandler() {
+func loadBatchGroups(csvPath string) [][]string {
+	file, err := os.Open(csvPath)
+	if err != nil {
+		log.Fatalf("Failed to open CSV file: %v", err)
+	}
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+	// Skip header
+	reader.Read()
+
+	var batches [][]string
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Printf("Error reading CSV: %v", err)
+			continue
+		}
+		batches = append(batches, record)
+	}
+	return batches
+}
+
+func processBatch(batch []string) {
+	files := batch[1:]
+
+	// Process first file normally
+	firstFile := files[0]
+	transaction := processFile(firstFile, false, "")
+	if transaction == nil {
+		log.Printf("Failed to process primary file %s, skipping batch", firstFile)
+		return
+	}
+
+	// Get ContractID from AWS and update if not set
+	contractID, err := queryAWSData(context.Background(), cfg, transaction.TransactionID)
+	if err != nil {
+		log.Printf("Failed to get ContractID for primary file %s: %v", firstFile, err)
+		return
+	}
+
+	// Process followup files
+	for _, followupFile := range files[1:] {
+		// Update XML content with ContractID before sending
+		if err := updateXMLWithContractID(followupFile, contractID); err != nil {
+			log.Printf("Failed to update file %s with ContractID: %v", followupFile, err)
+			continue
+		}
+
+		transaction := processFile(followupFile, true, contractID)
+		if transaction == nil {
+			log.Printf("Failed to process followup file %s", followupFile)
+			continue
+		}
+
+		// Wait for AWS confirmation for each followup
+		_, err := queryAWSData(context.Background(), cfg, transaction.TransactionID)
+		if err != nil {
+			log.Printf("Failed to confirm followup file %s: %v", followupFile, err)
+		}
+	}
+}
+
+func updateXMLWithContractID(filename string, contractID string) error {
+	filePath := filepath.Join(cfg.FolderPath, filename)
+	xmlData, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read XML file: %v", err)
+	}
+
+	// Parse XML
+	var doc map[string]interface{}
+	if err := xml.Unmarshal(xmlData, &doc); err != nil {
+		return fmt.Errorf("failed to parse XML: %v", err)
+	}
+
+	// Update ContractID field - you'll need to adjust this based on your XML structure
+	// This is a placeholder - implement the actual XML update logic
+
+	// Write updated XML back to file
+	updatedXML, err := xml.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal XML: %v", err)
+	}
+
+	return os.WriteFile(filePath, updatedXML, 0644)
+}
+
+// Split out file processing from apiRequestHandler
+func processFile(filename string, isFollowup bool, contractID string) *PendingTransaction {
 	// Load PFX certificate
 	pfxData, err := os.ReadFile(cfg.PfxPath)
 	if err != nil {
-		log.Fatalf("Failed to read PFX file: %v", err)
+		log.Printf("Failed to read PFX file: %v", err)
+		return nil
 	}
 
 	// Create TLS certificate from PFX
 	priv, cert, err := pkcs12.Decode(pfxData, cfg.PfxPassword)
 	if err != nil {
-		log.Fatalf("Failed to parse PFX file: %v", err)
+		log.Printf("Failed to parse PFX file: %v", err)
+		return nil
 	}
 	tlsCert := tls.Certificate{
 		Certificate: [][]byte{cert.Raw},
@@ -109,91 +194,147 @@ func apiRequestHandler() {
 		},
 	}
 
-	// Walk through the folder recursively
-	var files []os.DirEntry
-	err = filepath.WalkDir(cfg.FolderPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			files = append(files, d)
-		}
-		return nil
-	})
+	// Read the XML file content
+	filePath := filepath.Join(cfg.FolderPath, filename)
+	xmlData, err := os.ReadFile(filePath)
 	if err != nil {
-		log.Fatalf("Failed to walk through folder: %v", err)
+		log.Printf("Failed to read file %s: %v", filename, err)
+		return nil
 	}
 
-	// First pass: Process all files and collect transaction IDs
-	for _, file := range files {
-		// Skip if it's not an XML file
-		if filepath.Ext(file.Name()) != ".xml" {
-			log.Printf("Skipping non-XML file: %s", file.Name())
-			continue
-		}
-
-		// Read the XML file content
-		filePath := filepath.Join(cfg.FolderPath, file.Name())
-		xmlData, err := os.ReadFile(filePath)
-		if err != nil {
-			log.Printf("Failed to read file %s: %v", file.Name(), err)
-			continue
-		}
-
-		// Modified POST request using custom client
-		req, err := http.NewRequest("POST", cfg.APIEndpoint, bytes.NewReader(xmlData))
-		if err != nil {
-			log.Printf("Failed to create request for file %s: %v", file.Name(), err)
-			continue
-		}
-		req.Header.Set("Content-Type", "text/xml")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("Failed to send POST request for file %s: %v", file.Name(), err)
-			continue
-		}
-		defer resp.Body.Close()
-
-		responseBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Printf("Failed to read response for file %s: %v", file.Name(), err)
-			continue
-		}
-
-		// Extract contractID from XML request
-		var requestData struct {
-			ContractID string `xml:"contractID"`
-		}
-		if err := xml.Unmarshal(xmlData, &requestData); err != nil {
-			log.Printf("Failed to parse contractID from request %s: %v", file.Name(), err)
-			continue
-		}
-
-		// Extract transactionID from XML response
-		var responseData struct {
-			XMLName                  xml.Name `xml:"AddContractSyncResponseBatchXML"`
-			AddContractSyncResposnse struct {
-				AddContractSyncResponse struct {
-					TransactionID  string `xml:"transactionID"`
-					ResponseStatus string `xml:"responseStatus"`
-				} `xml:"AddContractSyncResponse"`
-			} `xml:"addContractSyncResponse"`
-		}
-		if err := xml.Unmarshal(responseBody, &responseData); err != nil {
-			log.Printf("Failed to parse transactionID from response %s: %v", file.Name(), err)
-			continue
-		}
-
-		// After getting response, store transaction info instead of querying AWS
-		pendingTransactions = append(pendingTransactions, PendingTransaction{
-			FileName:      file.Name(),
-			TransactionID: responseData.AddContractSyncResposnse.AddContractSyncResponse.TransactionID,
-		})
-
-		log.Printf("Processed file %s, stored transaction ID: %s", file.Name(),
-			responseData.AddContractSyncResposnse.AddContractSyncResponse.TransactionID)
+	// Modified POST request using custom client
+	req, err := http.NewRequest("POST", cfg.APIEndpoint, bytes.NewReader(xmlData))
+	if err != nil {
+		log.Printf("Failed to create request for file %s: %v", filename, err)
+		return nil
 	}
+	req.Header.Set("Content-Type", "text/xml")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Failed to send POST request for file %s: %v", filename, err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Failed to read response for file %s: %v", filename, err)
+		return nil
+	}
+
+	// Extract transactionID from XML response
+	var responseData struct {
+		XMLName                  xml.Name `xml:"AddContractSyncResponseBatchXML"`
+		AddContractSyncResposnse struct {
+			AddContractSyncResponse struct {
+				TransactionID  string `xml:"transactionID"`
+				ResponseStatus string `xml:"responseStatus"`
+			} `xml:"AddContractSyncResponse"`
+		} `xml:"addContractSyncResponse"`
+	}
+	if err := xml.Unmarshal(responseBody, &responseData); err != nil {
+		log.Printf("Failed to parse transactionID from response %s: %v", filename, err)
+		return nil
+	}
+
+	transaction := &PendingTransaction{
+		FileName:      filename,
+		TransactionID: responseData.AddContractSyncResposnse.AddContractSyncResponse.TransactionID,
+		IsFollowup:    isFollowup,
+		ContractID:    contractID,
+	}
+
+	log.Printf("Processed file %s, stored transaction ID: %s", filename,
+		responseData.AddContractSyncResposnse.AddContractSyncResponse.TransactionID)
+
+	return transaction
+}
+
+func apiRequestHandler(filename string, isFollowup bool, contractID string) *PendingTransaction {
+	// Load PFX certificate
+	pfxData, err := os.ReadFile(cfg.PfxPath)
+	if err != nil {
+		log.Printf("Failed to read PFX file: %v", err)
+		return nil
+	}
+
+	// Create TLS certificate from PFX
+	priv, cert, err := pkcs12.Decode(pfxData, cfg.PfxPassword)
+	if err != nil {
+		log.Printf("Failed to parse PFX file: %v", err)
+		return nil
+	}
+	tlsCert := tls.Certificate{
+		Certificate: [][]byte{cert.Raw},
+		PrivateKey:  priv,
+		Leaf:        cert,
+	}
+
+	// Create custom HTTP client with certificate
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				Certificates: []tls.Certificate{tlsCert},
+			},
+		},
+	}
+
+	// Read the XML file content
+	filePath := filepath.Join(cfg.FolderPath, filename)
+	xmlData, err := os.ReadFile(filePath)
+	if err != nil {
+		log.Printf("Failed to read file %s: %v", filename, err)
+		return nil
+	}
+
+	// Modified POST request using custom client
+	req, err := http.NewRequest("POST", cfg.APIEndpoint, bytes.NewReader(xmlData))
+	if err != nil {
+		log.Printf("Failed to create request for file %s: %v", filename, err)
+		return nil
+	}
+	req.Header.Set("Content-Type", "text/xml")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Failed to send POST request for file %s: %v", filename, err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Failed to read response for file %s: %v", filename, err)
+		return nil
+	}
+
+	// Extract transactionID from XML response
+	var responseData struct {
+		XMLName                  xml.Name `xml:"AddContractSyncResponseBatchXML"`
+		AddContractSyncResposnse struct {
+			AddContractSyncResponse struct {
+				TransactionID  string `xml:"transactionID"`
+				ResponseStatus string `xml:"responseStatus"`
+			} `xml:"AddContractSyncResponse"`
+		} `xml:"addContractSyncResponse"`
+	}
+	if err := xml.Unmarshal(responseBody, &responseData); err != nil {
+		log.Printf("Failed to parse transactionID from response %s: %v", filename, err)
+		return nil
+	}
+
+	transaction := &PendingTransaction{
+		FileName:      filename,
+		TransactionID: responseData.AddContractSyncResposnse.AddContractSyncResponse.TransactionID,
+		IsFollowup:    isFollowup,
+		ContractID:    contractID,
+	}
+
+	log.Printf("Processed file %s, stored transaction ID: %s", filename,
+		responseData.AddContractSyncResposnse.AddContractSyncResponse.TransactionID)
+
+	return transaction
 }
 
 func CsvWriter(transaction PendingTransaction, contractID string) {
