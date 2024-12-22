@@ -47,6 +47,19 @@ type PendingTransaction struct {
 	ContractID    string
 }
 
+type QueueEnrollment struct {
+	XMLName   xml.Name  `xml:"QueueEnrollment"`
+	Contracts Contracts `xml:"contracts"`
+}
+
+type Contracts struct {
+	Contract Contract `xml:"contract"`
+}
+
+type Contract struct {
+	ContractID string `xml:"contractID"`
+}
+
 func loadConfig() Config {
 	file, err := os.ReadFile("config.json")
 	if err != nil {
@@ -158,35 +171,17 @@ func updateXMLWithContractID(filename string, contractID string) error {
 		return fmt.Errorf("failed to read XML file: %v", err)
 	}
 
-	// Parse XML
-	var doc struct {
-		QueueEnrollment struct {
-			Contracts struct {
-				Contract struct {
-					ContractID string
-				} `xml:"Contract"`
-			} `xml:"Contracts"`
-		} `xml:"QueueEnrollment"`
-	}
-	if err := xml.Unmarshal(xmlData, &doc); err != nil {
-		return fmt.Errorf("failed to parse XML: %v", err)
-	}
+	var queueEnrollment QueueEnrollment
+	xml.Unmarshal(xmlData, &queueEnrollment)
 
 	// Update ContractID in XML structure
-	doc.QueueEnrollment.Contracts.Contract.ContractID = contractID
+	queueEnrollment.Contracts.Contract.ContractID = contractID
 
 	// Write updated XML back to file
-	updatedXML, err := xml.Marshal(doc)
+	updatedXML, err := xml.MarshalIndent(queueEnrollment, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal XML: %v", err)
 	}
-
-	// Format the XML with proper indentation
-	var buf bytes.Buffer
-	if err := xml.NewEncoder(&buf).Encode(xml.Header + string(updatedXML)); err != nil {
-		return fmt.Errorf("failed to format XML: %v", err)
-	}
-	updatedXML = buf.Bytes()
 
 	return os.WriteFile(filePath, updatedXML, 0644)
 }
@@ -321,7 +316,7 @@ func queryAWSData(ctx context.Context, cfg Config, transactionID string) (string
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	fmt.Print("Looking for ContractID in AWS")
+	log.Printf("Looking for Contract in AWS")
 
 	for {
 		select {
