@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	//openssl pkcs12 -export -inkey mykey.pem -in mycert.pem -out output.p12 -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -export -macalg sha1
@@ -171,21 +172,41 @@ func updateXMLWithContractID(filename string, contractID string) error {
 		return fmt.Errorf("failed to read XML file: %v", err)
 	}
 
-	var queueEnrollment QueueEnrollment
-	if err := xml.Unmarshal(xmlData, &queueEnrollment); err != nil {
-		return fmt.Errorf("failed to unmarshal XML: %v", err)
+	decoder := xml.NewDecoder(bytes.NewReader(xmlData))
+	var buffer bytes.Buffer
+	encoder := xml.NewEncoder(&buffer)
+	//encoder.Indent("", "  ") // Set indentation to two spaces
+
+	var inElement string
+	for {
+		t, err := decoder.Token()
+		if err != nil {
+			break
+		}
+
+		switch se := t.(type) {
+		case xml.StartElement:
+			inElement = se.Name.Local
+			encoder.EncodeToken(se)
+		case xml.EndElement:
+			inElement = ""
+			encoder.EncodeToken(se)
+		case xml.CharData:
+			if inElement == "contractID" {
+				se = xml.CharData(contractID)
+			}
+			encoder.EncodeToken(se)
+		default:
+			encoder.EncodeToken(t)
+		}
 	}
 
-	// Update ContractID in XML structure
-	queueEnrollment.Contracts.Contract.ContractID = contractID
+	encoder.Flush()
 
-	// Write updated XML back to file
-	updatedXML, err := xml.MarshalIndent(queueEnrollment, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal XML: %v", err)
-	}
+	// Replace tab characters with spaces
+	updatedXML := strings.ReplaceAll(buffer.String(), "&#x9;", "	")
 
-	return os.WriteFile(filePath, updatedXML, 0644)
+	return os.WriteFile(filePath, []byte(updatedXML), 0644)
 }
 
 func apiRequestHandler(filename string, isFollowup bool, contractID string) *PendingTransaction {
