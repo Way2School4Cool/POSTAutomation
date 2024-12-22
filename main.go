@@ -172,7 +172,9 @@ func updateXMLWithContractID(filename string, contractID string) error {
 	}
 
 	var queueEnrollment QueueEnrollment
-	xml.Unmarshal(xmlData, &queueEnrollment)
+	if err := xml.Unmarshal(xmlData, &queueEnrollment); err != nil {
+		return fmt.Errorf("failed to unmarshal XML: %v", err)
+	}
 
 	// Update ContractID in XML structure
 	queueEnrollment.Contracts.Contract.ContractID = contractID
