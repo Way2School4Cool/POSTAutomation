@@ -314,6 +314,8 @@ func queryAWSData(ctx context.Context, cfg Config, transactionID string) (string
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
+	fmt.Print("Looking for ContractID in AWS")
+	
 	for {
 		select {
 		case <-ctx.Done():
