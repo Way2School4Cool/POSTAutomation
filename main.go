@@ -165,21 +165,31 @@ func updateXMLWithContractID(filename string, contractID string) error {
 	}
 
 	// Update ContractID in XML structure
-	if queueEnrollment, ok := doc["QueueEnrollment"].(map[string]interface{}); ok {
-		if contracts, ok := queueEnrollment["Contracts"].(map[string]interface{}); ok {
-			if contract, ok := contracts["Contract"].(map[string]interface{}); ok {
-				contract["ContractID"] = contractID
-			}
-		}
+	type Contract struct {
+		ContractID string `xml:"ContractID"`
 	}
 
-	// Write updated XML back to file
-	updatedXML, err := xml.MarshalIndent(doc, "", "  ")
+	type Contracts struct {
+		Contract Contract `xml:"Contract"`
+	}
+
+	type QueueEnrollment struct {
+		Contracts Contracts `xml:"Contracts"`
+	}
+
+	var enrollment QueueEnrollment
+	if err := xml.Unmarshal(xmlData, &enrollment); err != nil {
+		return fmt.Errorf("failed to parse XML into struct: %v", err)
+	}
+
+	enrollment.Contracts.Contract.ContractID = contractID
+
+	xmlData, err = xml.Marshal(enrollment)
 	if err != nil {
-		return fmt.Errorf("failed to marshal XML: %v", err)
+		return fmt.Errorf("failed to marshal updated XML: %v", err)
 	}
 
-	return os.WriteFile(filePath, updatedXML, 0644)
+	return os.WriteFile(filePath, xmlData, 0644)
 }
 
 func apiRequestHandler(filename string, isFollowup bool, contractID string) *PendingTransaction {
