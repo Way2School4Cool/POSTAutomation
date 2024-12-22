@@ -176,10 +176,17 @@ func updateXMLWithContractID(filename string, contractID string) error {
 	doc.QueueEnrollment.Contracts.Contract.ContractID = contractID
 
 	// Write updated XML back to file
-	updatedXML, err := xml.MarshalIndent(doc, "", "  ")
+	updatedXML, err := xml.Marshal(doc)
 	if err != nil {
 		return fmt.Errorf("failed to marshal XML: %v", err)
 	}
+
+	// Format the XML with proper indentation
+	var buf bytes.Buffer
+	if err := xml.NewEncoder(&buf).Encode(xml.Header + string(updatedXML)); err != nil {
+		return fmt.Errorf("failed to format XML: %v", err)
+	}
+	updatedXML = buf.Bytes()
 
 	return os.WriteFile(filePath, updatedXML, 0644)
 }
@@ -315,7 +322,7 @@ func queryAWSData(ctx context.Context, cfg Config, transactionID string) (string
 	defer cancel()
 
 	fmt.Print("Looking for ContractID in AWS")
-	
+
 	for {
 		select {
 		case <-ctx.Done():
