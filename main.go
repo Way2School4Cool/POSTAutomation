@@ -157,10 +157,9 @@ func processBatch(batch []string) {
 			continue
 		}
 
-		// Wait for AWS confirmation for each followup
-		_, err := queryAWSData(context.Background(), cfg, transaction.TransactionID)
-		if err != nil {
-			log.Printf("Failed to confirm followup file %s: %v", followupFile, err)
+		// For followups, just verify the transaction appears in AWS logs
+		if err := verifyTransactionInAWS(context.Background(), cfg, transaction.TransactionID); err != nil {
+			log.Printf("Failed to verify followup file %s in AWS: %v", followupFile, err)
 		}
 	}
 }
@@ -385,6 +384,74 @@ func queryAWSData(ctx context.Context, cfg Config, transactionID string) (string
 						return *field.Value, nil
 					}
 				}
+			}
+		}
+	}
+}
+
+// New function to just verify transaction appears in AWS logs
+func verifyTransactionInAWS(ctx context.Context, cfg Config, transactionID string) error {
+	// Load AWS configuration with credentials
+	awsCfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(cfg.AWSRegion),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			cfg.AWSAccessKey,
+			cfg.AWSSecretKey,
+			cfg.AWSSessionToken,
+		)),
+	)
+	if err != nil {
+		return fmt.Errorf("unable to load AWS SDK config: %v", err)
+	}
+
+	// Create CloudWatch Logs client
+	cwl := cloudwatchlogs.NewFromConfig(awsCfg)
+
+	// Add timeout logic
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	log.Printf("Verifying transaction in AWS")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for transaction confirmation")
+		case <-time.After(20 * time.Second):
+			// Simplified query that just looks for the transaction ID
+			queryString := fmt.Sprintf(`fields ObjJson.addContractAsyncResponse.transactionId | filter ObjJson.addContractAsyncResponse.transactionId = '%s' | limit 1`,
+				transactionID)
+
+			startQuery, err := cwl.StartQuery(ctx, &cloudwatchlogs.StartQueryInput{
+				LogGroupName: aws.String(cfg.LogGroupName),
+				StartTime:    aws.Int64(time.Now().Add(-1 * time.Hour).Unix()),
+				EndTime:      aws.Int64(time.Now().Unix()),
+				QueryString:  aws.String(queryString),
+			})
+			if err != nil {
+				return fmt.Errorf("failed to start CloudWatch query: %v", err)
+			}
+
+			results, err := cwl.GetQueryResults(ctx, &cloudwatchlogs.GetQueryResultsInput{
+				QueryId: startQuery.QueryId,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to get query results: %v", err)
+			}
+
+			for results.Status == types.QueryStatusRunning {
+				time.Sleep(5 * time.Second)
+				results, err = cwl.GetQueryResults(ctx, &cloudwatchlogs.GetQueryResultsInput{
+					QueryId: startQuery.QueryId,
+				})
+				if err != nil {
+					return fmt.Errorf("failed to get query results: %v", err)
+				}
+			}
+
+			// If we find the transaction ID, return success
+			if results.Status == types.QueryStatusComplete && len(results.Results) > 0 {
+				return nil
 			}
 		}
 	}
